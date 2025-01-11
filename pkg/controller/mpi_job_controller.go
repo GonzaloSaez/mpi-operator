@@ -631,7 +631,9 @@ func (c *MPIJobController) syncHandler(key string) error {
 	var worker []*corev1.Pod
 	// We're done if the launcher either succeeded or failed.
 	done := launcher != nil && isJobFinished(launcher)
-	if !done {
+	// Avoid creating the related resources if the job is suspended. This improves interoperability with other tools such
+	// as kueue, since kueue may mutate the MPIJob labels before unsuspending the job.
+	if !done && !isMPIJobSuspended(mpiJob) {
 		_, err := c.getOrCreateService(mpiJob, newJobService(mpiJob))
 		if err != nil {
 			return fmt.Errorf("getting or creating Service to front workers: %w", err)
@@ -646,21 +648,18 @@ func (c *MPIJobController) syncHandler(key string) error {
 			return fmt.Errorf("creating SSH auth secret: %w", err)
 		}
 
-		if !isMPIJobSuspended(mpiJob) {
-			// Get the PodGroup for this MPIJob
-			if c.PodGroupCtrl != nil {
-				if podGroup, err := c.getOrCreatePodGroups(mpiJob); podGroup == nil || err != nil {
-					return err
-				}
-			}
-			worker, err = c.getOrCreateWorker(mpiJob)
-			if err != nil {
+		// Get the PodGroup for this MPIJob
+		if c.PodGroupCtrl != nil {
+			if podGroup, err := c.getOrCreatePodGroups(mpiJob); podGroup == nil || err != nil {
 				return err
 			}
 		}
-		// If the job is suspended, the list of worker pods will be incorrect. We also do
-		// not want to start the launcher job if the MPIJob starts suspended.
-		if launcher == nil && !isMPIJobSuspended(mpiJob) {
+		worker, err = c.getOrCreateWorker(mpiJob)
+		if err != nil {
+			return err
+		}
+
+		if launcher == nil {
 			if mpiJob.Spec.LauncherCreationPolicy == kubeflow.LauncherCreationPolicyAtStartup || c.countReadyWorkerPods(worker) == len(worker) {
 				launcher, err = c.kubeClient.BatchV1().Jobs(namespace).Create(context.TODO(), c.newLauncherJob(mpiJob), metav1.CreateOptions{})
 				if err != nil {
@@ -673,13 +672,13 @@ func (c *MPIJobController) syncHandler(key string) error {
 		}
 	}
 
-	if launcher != nil {
-		if isMPIJobSuspended(mpiJob) != isJobSuspended(launcher) {
-			// align the suspension state of launcher with the MPIJob
-			launcher.Spec.Suspend = ptr.To(isMPIJobSuspended(mpiJob))
-			if _, err := c.kubeClient.BatchV1().Jobs(namespace).Update(context.TODO(), launcher, metav1.UpdateOptions{}); err != nil {
-				return err
-			}
+	// To improve interoperatiblity with other controllers such as kueue, we need to delete the launcher job if the MPIJob is
+	// suspended and the launcher job is still running. This is to ensure that, if kueue decides to update the MPIJob nodeSelector,
+	// the launcher job will be recreated since that field is immutable after the launcher job is created.
+	if launcher != nil && isMPIJobSuspended(mpiJob) {
+		err := c.kubeClient.BatchV1().Jobs(namespace).Delete(context.TODO(), launcher.Name, metav1.DeleteOptions{})
+		if err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("deleting launcher Job: %w", err)
 		}
 	}
 

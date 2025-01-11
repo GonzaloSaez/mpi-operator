@@ -826,30 +826,12 @@ func TestCreateSuspendedMPIJob(t *testing.T) {
 			mpiJob.Spec.RunPolicy.Suspend = ptr.To(true)
 			mpiJob.Spec.MPIImplementation = implementation
 			f.setUpMPIJob(mpiJob)
-
-			// expect creation of objects
 			scheme.Scheme.Default(mpiJob)
-			f.expectCreateServiceAction(newJobService(mpiJob))
-			cfgMap := newConfigMap(mpiJob, replicas)
-			updateDiscoverHostsInConfigMap(cfgMap, mpiJob, nil)
-			f.expectCreateConfigMapAction(cfgMap)
-			secret, err := newSSHAuthSecret(mpiJob)
-			if err != nil {
-				t.Fatalf("Failed creating secret")
-			}
-			f.expectCreateSecretAction(secret)
-
-			// expect creating of the launcher
-			fmjc := f.newFakeMPIJobController()
-			launcher := fmjc.newLauncherJob(mpiJob)
-			launcher.Spec.Suspend = ptr.To(true)
-			f.expectCreateJobAction(launcher)
 
 			// expect an update to add the conditions
 			mpiJobCopy := mpiJob.DeepCopy()
 			mpiJobCopy.Status.ReplicaStatuses = map[kubeflow.MPIReplicaType]*kubeflow.ReplicaStatus{
-				kubeflow.MPIReplicaTypeLauncher: {},
-				kubeflow.MPIReplicaTypeWorker:   {},
+				kubeflow.MPIReplicaTypeWorker: {},
 			}
 			msg := fmt.Sprintf("MPIJob %s/%s is created.", mpiJob.Namespace, mpiJob.Name)
 			updateMPIJobConditions(mpiJobCopy, kubeflow.JobCreated, corev1.ConditionTrue, mpiJobCreatedReason, msg)
@@ -921,10 +903,8 @@ func TestSuspendedRunningMPIJob(t *testing.T) {
 	// transition the MPIJob into suspended state
 	mpiJob.Spec.RunPolicy.Suspend = ptr.To(true)
 
-	// expect moving the launcher pod into suspended state
-	launcherCopy := launcher.DeepCopy()
-	launcherCopy.Spec.Suspend = ptr.To(true)
-	f.expectUpdateJobAction(launcherCopy)
+	// expect the job to be deleted.
+	f.kubeActions = append(f.kubeActions, core.NewDeleteAction(schema.GroupVersionResource{Resource: "jobs", Group: "batch", Version: "v1"}, launcher.Namespace, launcher.Name))
 
 	// expect removal of the pods
 	for i := 0; i < int(replicas); i++ {
@@ -982,12 +962,6 @@ func TestResumeMPIJob(t *testing.T) {
 	}
 	f.setUpSecret(secret)
 
-	// expect creating of the launcher
-	fmjc := f.newFakeMPIJobController()
-	launcher := fmjc.newLauncherJob(mpiJob)
-	launcher.Spec.Suspend = ptr.To(true)
-	f.setUpLauncher(launcher)
-
 	// move the timer by a second so that the StartTime is updated after resume
 	fakeClock.Sleep(time.Second)
 
@@ -995,15 +969,15 @@ func TestResumeMPIJob(t *testing.T) {
 	mpiJob.Spec.RunPolicy.Suspend = ptr.To(false)
 
 	// expect creation of the pods
+	fmjc := f.newFakeMPIJobController()
 	for i := 0; i < int(replicas); i++ {
 		worker := fmjc.newWorker(mpiJob, i)
 		f.kubeActions = append(f.kubeActions, core.NewCreateAction(schema.GroupVersionResource{Resource: "pods"}, mpiJob.Namespace, worker))
 	}
 
-	// expect the launcher update to resume it
-	launcherCopy := launcher.DeepCopy()
-	launcherCopy.Spec.Suspend = ptr.To(false)
-	f.expectUpdateJobAction(launcherCopy)
+	// expect the launcher job te created after resuming.
+	launcher := fmjc.newLauncherJob(mpiJob)
+	f.setUpLauncher(launcher)
 
 	// expect an update to add the conditions
 	mpiJobCopy := mpiJob.DeepCopy()

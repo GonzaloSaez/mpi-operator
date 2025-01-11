@@ -415,7 +415,6 @@ func TestMPIJobResumingAndSuspending(t *testing.T) {
 		Reason: "MPIJobSuspended",
 	}, mpiJob))
 
-	_, launcherJob := validateMPIJobDependencies(ctx, t, s.kClient, mpiJob, 0, nil)
 	mpiJob = validateMPIJobStatus(ctx, t, s.mpiClient, mpiJob, map[kubeflow.MPIReplicaType]*kubeflow.ReplicaStatus{
 		kubeflow.MPIReplicaTypeLauncher: {},
 		kubeflow.MPIReplicaTypeWorker:   {},
@@ -425,9 +424,6 @@ func TestMPIJobResumingAndSuspending(t *testing.T) {
 	}
 	if !mpiJobHasCondition(mpiJob, kubeflow.JobSuspended) {
 		t.Errorf("MPIJob missing Suspended condition")
-	}
-	if !isJobSuspended(launcherJob) {
-		t.Errorf("LauncherJob is suspended")
 	}
 	if mpiJob.Status.StartTime != nil {
 		t.Errorf("MPIJob has unexpected start time: %v", mpiJob.Status.StartTime)
